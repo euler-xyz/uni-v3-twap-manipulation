@@ -55,13 +55,13 @@ Consider the DAI-USDC price. The spot price at block $i$ is denoted $p_i$. The g
 Now consider the effect of an attacker on the TWAP. Suppose the spot price on each block is manipulated to some target $q$, for a period of $m$ blocks, and is otherwise some constant spot price $p$ for the remaining $n - m$ blocks. Then the TWAP is calculated as
 
 \begin{equation}
-\label{eq:gm-twap-manipulated}
+\label{eq:gm-TWAP-manipulated}
 \text{TWAP}
 =
 \left( p^{(n-m)} \cdot q^m \right)^{\frac{1}{n}}.
 \end{equation}
 
-An attacker wanting to manipulate the TWAP to some particular oracle price over $m$ blocks will need to know what spot price $q$ they need to move the normal spot price $p$ to in each of those blocks. We can calculate this by simply rearranging equation \eqref{eq:gm-twap-manipulated}. We obtain
+An attacker wanting to manipulate the TWAP to some particular oracle price over $m$ blocks will need to know what spot price $q$ they need to move the normal spot price $p$ to in each of those blocks. We can calculate this by simply rearranging equation \eqref{eq:gm-TWAP-manipulated}. We obtain
 
 \begin{equation}
 \label{eq:gm-spot-manipulated}
@@ -277,6 +277,33 @@ Third, an attack of this nature would require the attacker to acquire a large in
 
 One might imagine that an attacker could use a service like flashbots to hide their manipulation transaction, back run their own manipulation transaction to alleviate slippage, or fill up blocks to prevent arbitrage. However, as we highlighted above, the ordering of the TWAP update means that all spot price manipulation attacks will be publicly exposed for at least one block, presenting a potentially large arbitrage opportunity to flashbots searchers and other arbitrage bots. The efficient block space market created by flashbots is therefore expected to require the attacker to bid up the bundle cost of each block to a level that approaches the slippage cost, $c$. Rather than make TWAP manipulation attacks more likely, one could even argue that they make them less likely. However, this is a complex and continuously evolving topic that will require a lot more research.
 
+\section{Liveness}
+
+Uniswap v3 TWAP oracles may fail in more subtle ways than manipulation. When calling observe, the oracle specifies a secondsAgo which is a parameter that sets the length of the TWAP. Observations is an array that contains cumulative values of the TWAP. If you call observe with secondsAgo = $[3600,0]$ you should get a 1 hour TWAP right? Well as long as sufficinetly many entires of the observations array have been initialized so that the earliest tick cumulative was added at least an hour ago, you would be right. If the earliest tick cumulative is more recent than an hour ago, you are not actually getting a 1 hour TWAP you are getting something shorter. 
+
+So how do we know when we have sufficiently many observations initialized?
+The answer requires an intricate understanding of how the TWAP is calculated.
+The first time a uniswap pool is called within each block, it updates one of its observations with the data from that block.
+So depending on how often the pool is called, it could be as often as every block.
+Indeed, we should probably just assume that it gets called every block since an attacker could simply interact with the pool every block if it was advantageous to do so.
+So what if we wanted to compute a 1 hour TWAP, we are going to call observe(secondsAgo = [3600,0]).
+Then we need enough observations so that we will consistenty have an observation from an hour ago in storage.
+The average blocktime is 13 seconds on ethereum so can we just initialize ~3600/13 = 277 observations.
+But then what we will be getting is an observation which is sometimes a 1 hour TWAP and sometimes a 55 minute TWAP because the number of blocks mined in 1 hour is a random variable. 
+
+In proof of work systems, we model block arrival as a poisson point process. Consider the following argument for why. 
+When a miner checks a nonce, the random variable $S$ which encodes whether the hash produced is sufficiently small the meet the current difficulty requirement is bernouli($p$) where $p$ is very small. 
+So the number of valid blocks produced in a given time interval is $P = H \cdot S$ where $H$ is the total hashrate over that window. So the number of blocks mined in a window $P$ is binomial with large $n$ and small $p$. The poisson point process is defined as the limit of a binomial as $n \to \infty$ and $p \to 0$ so this model is quite accurate. 
+
+Given that block arrival in a 1 hour window on Ethereum is $\sim$Poisson($3600/13$), we can see that there is a high probability that more than 280 blocks get mined in a 1 hour period.
+
+Of course, even if we aren't getting a 1 hour TWAP, we are probably getting a 55 minute TWAP or around there so this isn't neccearily a bad thing. In fact it might actually be a good thing if we play our cards right.
+When should we expect a ton of calls to a the pool and therefore heavy use of the oracle slots in a short period? 
+Precicely when volatility is highest, which also happens to be when we want our oracles to be the most live. So maybee it makes sense to have an oracle which becomes more live when the pool is under heavy load. We could do this by calling observe(secondsAgo = [a,0]) in which case we will get a standard length TWAP unless the network is under heavy enough load that the oldest observations have been overwritten.
+The problem with this aproach is that anyone can increase the number of initialized observations for whatever reason so we may not always have this addaptive liveness property.
+If you want to have adaptive liveness no matter what, you can query the observations directly so you would call the observation 50 slots before the current one for example\footnote{Be careful implementing this because the implemenation wraps around the observations array, overwriting previous observations.}.
+
+The key insight in this discussion is that the number of initialized observations on a univ3 pool decides its TWAP behavior as much or more than secondsAgo in the observe call. The actionable result is to monitor this input when calculating oracle quality. 
 \section{Conclusion}
 
 Manipulation of the Uniswap v3 geometric mean TWAP is technically possible, but only under restrictive conditions. To carry out a single-block manipulation attack, there must be negligible liquidity in a pool, otherwise the scale of the spot price manipulation needed will often require a swap of more assets than an attacker can feasibly access. To carry out a multi-block attack, an attacker must have access to significant initial funds and must be prepared to lose all of them, with no guarantee of making a profit. The pool must also have very little liquidity distributed over the entire range. An attacker may attempt to use flashbots to limit the impact of arbitrage on their spot price manipulation. However, flashbots creates an efficient market for block space, and it is more than likely that searchers will bid up the bundle cost for blocks to the marginal price of the arbitrage available. Ultimately, multi-block attacks are unlike any attack we have see yet in decentralised finance, because they do not offer risk-free profit opportunities to attackers of the kind usually used to attack protocols in the context of an atomic transaction. 
